@@ -1,0 +1,34 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Deploys S3 for Artifactory."
+Parameters:
+#####
+#
+  Stage:
+    Type: String
+    Description: "Stage tag prod or *"
+    Default: "non-prod"
+  Application:
+    Type: String
+    Default: artificatory
+Resources:
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+
+  S3Parameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Application, !Ref Stage, "s3", "arn","cf" ] ]
+      Type: "String"
+      Value: !GetAtt S3Bucket.Arn

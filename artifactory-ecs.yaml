@@ -1,0 +1,443 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Deploys postgres RDS for Artifactory."
+
+Parameters:
+  Stage:
+    Type: String
+    Description: "Stage tag prod or *"
+    Default: "dev"
+    AllowedValues:
+      - "dev"
+      - "prod"
+  Application:
+    Type: String
+    Default: artificatory-ecs
+
+  ImageUrl:
+    Type: String
+    Default: docker.bintray.io/jfrog/artifactory-pro:7.3.2
+
+  ArtiVPCParam:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: 'VPC to deploy in'
+
+  ArtiURL:
+    Type: String
+    Default: 'artifactory.FIRSTDOMAIN.com'
+  ArtiURLSECONDDOMAIN:
+    Type: String
+    Default: 'artifactory.SECONDDOMAIN.com'
+
+  ArtiALBListenerPriorityParam:
+    Type: String
+    Default: '11'
+
+  ArtiALBListenerPriorityParamSECONDDOMAIN:
+    Type: String
+    Default: '21'
+
+  ArtiDNSHostedZoneIdSECONDDOMAIN:
+    Type: String
+    Default: XXXXXXXXXXXXXX
+  ArtiDNSHostedZoneId:
+    Type: String
+    Default: YYYYYYYYYYYYYY
+  PrivateSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: "DEV_PRIVATE_SUBNET_1,DEV_PRIVATE_SUBNET_2,DEV_PRIVATE_SUBNET_3, ..."
+
+  # EFSRootDirectory:
+  #   Type: String
+
+  ContainerFrontendPort:
+    Type: String
+    Description: "8081 for 6.x, 8082 for 7.x"
+    AllowedValues:
+      - 8082
+      - 8081
+
+#Monitoring and Alerting
+  ComparisonOperator:
+    Description: Comparison Operator for Alarm
+    Type: String
+    Default: LessThanThreshold
+    AllowedValues:
+    - GreaterThanOrEqualToThreshold
+    - GreaterThanThreshold
+    - LessThanThreshold
+    - LessThanOrEqualToThreshold
+  Statistic:
+    Description: The statistic to apply to the alarm's associated metric
+    Type: String
+    Default: Minimum
+    AllowedValues:
+    - SampleCount
+    - Average
+    - Sum
+    - Minimum
+    - Maximum
+
+Mappings:
+  DnsMapping:
+    dev:
+      value: 'dev.'
+    prod:
+      value: ''
+
+Resources:
+  EfsAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Sub "{{resolve:ssm:/${Stage}/${Application}/efs/systemID}}"
+      PosixUser:
+        Gid: "1030"
+        Uid: "1030"
+      # RootDirectory:
+      #   CreationInfo:
+      #     OwnerGid: "1030"
+      #     OwnerUid: "1030"
+      #     Permissions: "0777"
+      #   Path: !Ref EFSRootDirectory
+
+#ECS Cluster
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Join [ '-', [ !Ref Application, !Ref Stage, "ecs-cluster" ,"cf"] ]
+      CapacityProviders:
+        - "FARGATE"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+#ECS service1 logging
+  CloudWatchLogGroupService1:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join [ '/', ["","ecs",!Ref Application,!Ref Stage,"cf"  ] ]
+      RetentionInDays: 14
+
+  CloudWatchLogStreamService1:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref CloudWatchLogGroupService1
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+            - 'sts:AssumeRole'
+          Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+        Version: '2012-10-17'
+      Policies:
+        - PolicyName: allowS3getObject
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+                - s3:*
+              Resource:
+                - !Join [ '/', [ !Sub "{{resolve:ssm:/${Application}/${Stage}/s3/arn/cf}}", "*" ] ]
+            - Effect: Allow
+              Action:
+                - s3:*
+              Resource:
+                - !Sub "{{resolve:ssm:/${Application}/${Stage}/s3/arn/cf}}"
+            - Effect: Deny
+              Action:
+                - s3:DeleteBucket
+              Resource:
+                - "*"
+        - PolicyName: AllowCloudwatch
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: "*"
+      Path: /
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Name:  !Join [ "-", [ !Ref Application, !Ref Stage ]]
+          Essential: true
+          Image: !Ref ImageUrl
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              awslogs-group: !Ref CloudWatchLogGroupService1
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Ref CloudWatchLogStreamService1
+          PortMappings:
+            - ContainerPort: 8081
+              HostPort: 8081
+              Protocol: "tcp"
+            - ContainerPort: 8082
+              HostPort: 8082
+              Protocol: "tcp"
+          MountPoints:
+            - ContainerPath: /var/opt/jfrog/artifactory
+              ReadOnly: false
+              SourceVolume: EfsVolume
+          Ulimits:
+            - Name: nofile
+              HardLimit: 32000
+              SoftLimit: 32000
+            - Name: nproc
+              HardLimit: 65535
+              SoftLimit: 65535
+          # Environment:
+          #   - Name: 'ENABLE_MIGRATION'
+          #     Value: 'y'
+      Volumes:
+        - Name: EfsVolume
+          EFSVolumeConfiguration:
+            FilesystemId: !Sub "{{resolve:ssm:/${Stage}/${Application}/efs/systemID}}"
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !GetAtt EfsAccessPoint.AccessPointId
+          # Secrets:
+          #   - Name: APP_KEY
+          #     ValueFrom: !Sub "/${Application}/${Stage}/ecsparamAPPKEY"
+          #   - Name: DB_HOST
+          #     ValueFrom: !Sub "/${Application}/${Stage}/ecsparamDBHOST"
+          # stageFiles:
+          #   - Value: !Sub "{{resolve:ssm:/${Application}/${Stage}/s3ECSStageFiles/arn}}/${ecsEnvFile}"
+          #     Type: "s3"
+      Cpu: "4096"
+      Memory: "8192"
+      ExecutionRoleArn: "arn:aws:iam::012345678912:role/ecsTaskExecutionRole" #DEFAULT ECS ROLE
+      TaskRoleArn: !GetAtt  ECSTaskRole.Arn
+      Family: !Join [ "-", [ !Ref Application, !Ref Stage ] ]
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+
+  # #ECS service security group
+  ECSSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: !Sub "SG for ${Application} ${Stage} ECS."
+      VpcId: !Ref ArtiVPCParam
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Sub "{{resolve:ssm:/${Application}/${Stage}/sgr/alb/arn}}"
+          FromPort: 80
+          IpProtocol: "tcp"
+          ToPort: 80
+        - SourceSecurityGroupId: !Sub "{{resolve:ssm:/${Application}/${Stage}/sgr/alb/arn}}"
+          FromPort: 8081
+          IpProtocol: "tcp"
+          ToPort: 8081
+        - SourceSecurityGroupId: !Sub "{{resolve:ssm:/${Application}/${Stage}/sgr/alb/arn}}"
+          FromPort: 8082
+          IpProtocol: "tcp"
+          ToPort: 8082
+
+  InboundRuleEcs: #allow self
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      SourceSecurityGroupId: !GetAtt ECSSecurityGroup.GroupId
+      GroupId: !GetAtt ECSSecurityGroup.GroupId
+
+  SGParameterArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Stage, !Ref Application, "sgr", "ECSSecurityGroup" ] ]
+      Type: "String"
+      Value: !GetAtt ECSSecurityGroup.GroupId
+####################
+
+#artifactory-efs.yaml Inbound rule, in seperate template to prevent circular dependency
+  InboundRuleECStoEFS:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !GetAtt ECSSecurityGroup.GroupId
+      GroupId: !Sub "{{resolve:ssm:/${Stage}/${Application}/sgr/EfsSecurityGroup}}"
+      Description: "Allow ECS to EFS"
+####################
+
+#artifactory-db.yaml Inbound rule, in seperate template to prevent circular dependency
+  InboundRuleECStoRDS:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt ECSSecurityGroup.GroupId
+      GroupId: !Sub "{{resolve:ssm:/${Stage}/${Application}/sgr/RdsSecurityGroup}}"
+      Description: "Allow ECS to RDS"
+####################
+
+  TargetGroupArtifactory:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 90
+      Port: !Ref ContainerFrontendPort
+      Protocol: "HTTP"
+      HealthCheckPort: !Ref ContainerFrontendPort
+      HealthCheckProtocol: "HTTP"
+      UnhealthyThresholdCount: 3
+      TargetType: "ip"
+      HealthyThresholdCount: 3
+      VpcId: !Ref ArtiVPCParam
+      HealthCheckEnabled: true
+      HealthCheckPath: /
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60
+
+  TargetGroupParameterARN:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Application, !Ref Stage, "target-group", "arn","cf" ] ]
+      Type: "String"
+      Value: !Ref TargetGroupArtifactory
+
+  # *.FIRSTDOMAIN.com
+  ArtiALBRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref TargetGroupArtifactory
+          Type: forward
+      Conditions:
+        - Field: host-header
+          Values:
+              - !Join [ '', [ !FindInMap ["DnsMapping", !Ref Stage, "value"], !Ref ArtiURL ] ]
+      Priority: !Ref ArtiALBListenerPriorityParam
+      ListenerArn: !Sub "{{resolve:ssm:/${Application}/${Stage}/https-listener/arn/cf}}"
+
+  # *.SECONDDOMAIN.com
+  ArtiALBRuleSECONDDOMAIN:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref TargetGroupArtifactory
+          Type: forward
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Join [ '', [ !FindInMap ["DnsMapping", !Ref Stage, "value"], !Ref ArtiURLSECONDDOMAIN ] ]
+      Priority: !Ref ArtiALBListenerPriorityParamSECONDDOMAIN
+      ListenerArn: !Sub "{{resolve:ssm:/${Application}/${Stage}/https-listener/arn/cf}}"
+
+  ArtiDNSRecord:
+    Type: "AWS::Route53::RecordSet"
+    Properties:
+      AliasTarget:
+        HostedZoneId: !Sub "{{resolve:ssm:/${Application}/${Stage}/alb/hosted-zone-id/cf}}"
+        DNSName: !Sub "{{resolve:ssm:/${Application}/${Stage}/alb/dns/cf}}"
+      Comment: 'Artifactory FIRSTDOMAIN'
+      HostedZoneId: !Ref ArtiDNSHostedZoneId
+      Name: !Join [ '', [ !FindInMap ["DnsMapping", !Ref Stage, "value"], !Ref ArtiURL ] ]
+      Type: 'A'
+
+  ArtiDNSRecordSECONDDOMAIN:
+    Type: "AWS::Route53::RecordSet"
+    Properties:
+      AliasTarget:
+        HostedZoneId: !Sub "{{resolve:ssm:/${Application}/${Stage}/alb/hosted-zone-id/cf}}"
+        DNSName: !Sub "{{resolve:ssm:/${Application}/${Stage}/alb/dns/cf}}"
+      Comment: 'Artifactory  SECONDDOMAIN'
+      HostedZoneId: !Ref ArtiDNSHostedZoneIdSECONDDOMAIN
+      Name: !Join [ '', [ !FindInMap ["DnsMapping", !Ref Stage, "value"], !Ref ArtiURLSECONDDOMAIN ] ]
+      Type: 'A'
+
+  # #ECS service
+  ECSService:
+    DependsOn:
+      - ArtiALBRule
+      - ArtiALBRuleSECONDDOMAIN
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DeploymentController:
+        Type: ECS
+      DesiredCount: 1
+      EnableECSManagedTags: true
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+            AssignPublicIp: "DISABLED"
+            SecurityGroups:
+              - !Ref ECSSecurityGroup
+            Subnets: !Ref PrivateSubnets
+      # ServiceName: !Join [ '-', [ !Ref project,!Ref environment, "serviceName",  ] ]
+      TaskDefinition: !Ref ECSTaskDefinition
+      LoadBalancers:
+        - ContainerName: !Join [ "-", [ !Ref Application, !Ref Stage ]]
+          ContainerPort: !Ref ContainerFrontendPort
+          TargetGroupArn: !Ref TargetGroupArtifactory
+
+  CwAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "Artifactory-ecs ${Stage} is down"
+      AlarmDescription: Trigger alarm If HealthyHostCount lower than 1 (threshold) in 3 periods of 60 seconds (container takes on average 3 minutes to start)
+      ComparisonOperator:
+        Ref: ComparisonOperator
+      MetricName: HealthyHostCount
+      Namespace: AWS/ApplicationELB
+      EvaluationPeriods: '3'
+      Period: '60'
+      Threshold: '1'
+      Statistic:
+        Ref: Statistic
+      TreatMissingData: breaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Sub "{{resolve:ssm:/${Application}/${Stage}/alb/loadBalancerfullname/cf}}"
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroupArtifactory.TargetGroupFullName
+      AlarmActions:
+        - !Sub "{{resolve:ssm:/${Stage}/${Application}/sns/arn}}"
+
+
+  # HTTPCodeELB4XX:
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmDescription: Alarm for ELB HTTPCode_ELB_4XX Metric
+  #     ComparisonOperator:
+  #       Ref: ComparisonOperator
+  #     EvaluationPeriods: '3'
+  #     Statistic:
+  #       Ref: Statistic
+  #     MetricName: HTTPCode_ELB_4XX
+  #     Namespace: AWS/ELB
+  #     Period: '60'
+  #     Threshold: '90'
+
+  # HTTPCodeBackend5XX:
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmDescription: Alarm for ELB HTTPCode_Backend_5XX Metric
+  #     ComparisonOperator:
+  #       Ref: ComparisonOperator
+  #     EvaluationPeriods: '3'
+  #     Statistic:
+  #       Ref: Statistic
+  #     MetricName: HTTPCode_Backend_5XX
+  #     Namespace: AWS/ELB
+  #     Period: '60'
+  #     Threshold: '90'

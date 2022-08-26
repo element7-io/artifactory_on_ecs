@@ -1,0 +1,8 @@
+{
+    "Parameters": {
+        "Stage": "prod",
+        "Application": "artifactory",
+        "Repository": "MY_REPO_URL",
+        "BranchName": "main"
+    }
+}

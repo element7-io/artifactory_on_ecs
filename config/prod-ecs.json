@@ -1,0 +1,15 @@
+{
+    "Parameters": {
+        "Stage": "prod",
+        "Application": "artifactory",
+        "ArtiVPCParam": "VPC_IDENTIFIER",
+        "PrivateSubnets": "PROD_PRIVATE_SUBNET_1,PROD_PRIVATE_SUBNET_2,PROD_PRIVATE_SUBNET_3, ...",
+        "ImageUrl": "docker.bintray.io/jfrog/artifactory-pro:7.37.13",
+        "ContainerFrontendPort": "8082"
+    },
+    "Tags" : {
+        "Application" : "artifactory",
+        "Stage": "prod",
+        "Repository": "MY_REPO_URL"
+    }
+}

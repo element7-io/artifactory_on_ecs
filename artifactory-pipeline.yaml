@@ -1,0 +1,235 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Pipeline."
+
+Parameters:
+  Application:
+    Type: "String"
+    Description: "Name of the project."
+    Default: "artifactory"
+  ArtifactBucketName:
+    Type: "String"
+    Default: "mys3-artifacts-012345678912-eu-west-1-cfn"
+  CodeStarConnectionArn:
+    Type: "String"
+    Default: "arn:aws:codestar-connections:eu-west-1:012345678912:connection/ABCDEFGH-1234-1234-ABCD-1234567890123
+  RepositoryId:
+    Type: String
+    Default: "MYWORKSPACE/REPONAME"
+  BranchName:
+    Type: String
+    Default: main
+  Stage:
+    Type: String
+    Default: dev
+
+Resources:
+  # CodePipeline IAM Role
+  CodePipelineServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action:
+              - "sts:AssumeRole"
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+      Path: "/"
+      Policies:
+        - PolicyName: "DefaultCodePipelinePolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Resource:
+                  - !Sub "arn:aws:s3:::${ArtifactBucketName}"
+                  - !Sub "arn:aws:s3:::${ArtifactBucketName}/*"
+                  - "arn:aws:s3:::codepipeline*"
+                  - "arn:aws:s3:::codepipeline*/*"
+                Effect: "Allow"
+                Action:
+                  - "s3:*"
+              - Resource: "*"
+                Effect: "Allow"
+                Action:
+                  - "codebuild:BatchGetBuilds"
+                  - "codebuild:StartBuild"
+                  - "codedeploy:CreateDeployment"
+                  - "codedeploy:GetApplicationRevision"
+                  - "codedeploy:GetDeployment"
+                  - "codedeploy:GetDeploymentConfig"
+                  - "codedeploy:RegisterApplicationRevision"
+                  - "lambda:invokefunction"
+                  - "lambda:listfunctions"
+        - PolicyName: "CloudFormationAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Resource: "*"
+                Effect: "Allow"
+                Action:
+                  - "cloudformation:GetTemplate"
+                  - "cloudformation:CreateStack"
+                  - "cloudformation:DeleteStack"
+                  - "cloudformation:DescribeStacks"
+                  - "cloudformation:UpdateStack"
+                  - "cloudformation:DescribeStackResource"
+                  - "cloudformation:DescribeStackResources"
+                  - "cloudformation:DescribeStackEvents"
+                  - "cloudformation:CreateChangeSet"
+                  - "cloudformation:DeleteChangeSet"
+                  - "cloudformation:DescribeChangeSet"
+                  - "cloudformation:ExecuteChangeSet"
+                  - "cloudformation:SetStackPolicy"
+                  - "cloudformation:ValidateTemplate"
+                  - "iam:PassRole"
+        - PolicyName: "CodeStarAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Resource: !Ref CodeStarConnectionArn
+                Effect: "Allow"
+                Action:
+                  - "codestar-connections:UseConnection"
+
+  CloudFormationExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Action:
+            - "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service:
+              - "cloudformation.amazonaws.com"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AdministratorAccess"
+
+  # -- Definition of the CodePipeline.
+  DeliveryPipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      RestartExecutionOnUpdate: true
+      ArtifactStore:
+        Location: !Ref ArtifactBucketName
+        Type: "S3"
+      Name: !Sub "${Application}-${Stage}-pipeline-cfn"
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      Stages:
+        - Name: "Source"
+          Actions:
+            - Name: "DeliverySource"
+              ActionTypeId:
+                Category: "Source"
+                Owner: "AWS"
+                Provider: "CodeStarSourceConnection"
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref CodeStarConnectionArn
+                FullRepositoryId: !Ref RepositoryId
+                BranchName: !Ref BranchName
+                OutputArtifactFormat: "CODE_ZIP"
+              OutputArtifacts:
+                - Name: "SourceDeliveryZip"
+        - Name: "Deploy"
+          Actions:
+            - Name: "Deploy_alb_cfn"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CREATE_UPDATE"
+                Capabilities: "CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                StackName: !Sub "${Application}-ecs-${Stage}-alb-pipeline-cfn"
+                TemplatePath: "SourceDeliveryZip::artifactory-alb.yaml"
+                TemplateConfiguration: !Sub "SourceDeliveryZip::config/${Stage}-alb.json"
+              RunOrder: 1
+              InputArtifacts:
+                - Name: "SourceDeliveryZip"
+            - Name: "Deploy_s3_cfn"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CREATE_UPDATE"
+                Capabilities: "CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                StackName: !Sub "${Application}-ecs-${Stage}-s3-pipeline-cfn"
+                TemplatePath: "SourceDeliveryZip::artifactory-s3.yaml"
+                TemplateConfiguration: !Sub "SourceDeliveryZip::config/${Stage}-s3.json"
+              RunOrder: 1
+              InputArtifacts:
+                - Name: "SourceDeliveryZip"
+            - Name: "Deploy_efs_cfn"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CREATE_UPDATE"
+                Capabilities: "CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                StackName: !Sub "${Application}-ecs-${Stage}-efs-pipeline-cfn"
+                TemplatePath: "SourceDeliveryZip::artifactory-efs.yaml"
+                TemplateConfiguration: !Sub "SourceDeliveryZip::config/${Stage}-efs.json"
+              RunOrder: 1
+              InputArtifacts:
+                - Name: "SourceDeliveryZip"
+            - Name: "Deploy_db_cfn"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CREATE_UPDATE"
+                Capabilities: "CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                StackName: !Sub "${Application}-ecs-${Stage}-db-pipeline-cfn"
+                TemplatePath: "SourceDeliveryZip::artifactory-db.yaml"
+                TemplateConfiguration: !Sub "SourceDeliveryZip::config/${Stage}-db.json"
+              RunOrder: 1
+              InputArtifacts:
+                - Name: "SourceDeliveryZip"
+            - Name: "Deploy_ecs_cfn"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CREATE_UPDATE"
+                Capabilities: "CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                StackName: !Sub "${Application}-ecs-${Stage}-ecs-pipeline-cfn"
+                TemplatePath: "SourceDeliveryZip::artifactory-ecs.yaml"
+                TemplateConfiguration: !Sub "SourceDeliveryZip::config/${Stage}-ecs.json"
+              RunOrder: 2
+              InputArtifacts:
+                - Name: "SourceDeliveryZip"
+            - Name: "Deploy_backup_cfn"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CREATE_UPDATE"
+                Capabilities: "CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                StackName: !Sub "${Application}-ecs-${Stage}-backup-pipeline-cfn"
+                TemplatePath: "SourceDeliveryZip::artifactory-backup.yaml"
+                TemplateConfiguration: !Sub "SourceDeliveryZip::config/${Stage}-backup.json"
+              RunOrder: 3
+              InputArtifacts:
+                - Name: "SourceDeliveryZip"

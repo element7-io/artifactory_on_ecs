@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Deploy an ALB with a security group."
+
+Parameters:
+  ALBSchemeParam:
+    Type: String
+    Description: "Select the scope of the ALB."
+    Default: internet-facing
+    AllowedValues:
+      - internal
+      - internet-facing
+  ALBVPCParam:
+    Type: AWS::EC2::VPC::Id
+    Description: "Select VPC in which to deploy ALB."
+
+  #Multiple domains, make changes to what your setup requires!
+  ALBCertificateParam:
+    Type: String
+    Description: "Specifies the ARN of the SSL certificate for *.YOURDOMAIN.com associated with the ALB."
+    Default: arn:aws:acm:eu-west-1:012345678912:certificate/ABCDEFGH-1234-1234-ABCD-1234567890123
+    AllowedPattern: "^arn:aws:acm:.+:certificate/[a-f0-9-]+$"
+  SECONDDOMAINALBCertificateParam:
+    Type: String
+    Description: "The ARNs of the SSL certificate for *.YOURDOMAIN.com  associated with the ALB."
+    Default: arn:aws:acm:eu-west-1:012345678912:certificate/ABCDEFGH-1234-1234-ABCD-1234567890123
+  ALBArtifactoryCertificateParam:
+    Type: String
+    Description: "The ARNs of the SSL certificate for *.SUBDOMAIN.YOURDOMAIN.com associated with the ALB."
+    Default: arn:aws:acm:eu-west-1:012345678912:certificate/ABCDEFGH-1234-1234-ABCD-1234567890123
+  SECONDDOMAINALBArtifactoryCertificateParam:
+    Type: String
+    Description: "The ARNs of the SSL certificate for *.SUBDOMAIN.YOURDOMAIN.com associated with the ALB."
+    Default: arn:aws:acm:eu-west-1:012345678912:certificate/ABCDEFGH-1234-1234-ABCD-1234567890123
+  PublicSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+#####
+# 
+  Stage:
+    Type: String
+    Description: "Stage tag prod or *"
+    Default: "non-prod"
+  Application:
+    Type: String
+    Default: artificatory
+
+Resources:
+  SgrALB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${Application}-${Stage} ALB security group"
+      VpcId: !Ref ALBVPCParam
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  InboundRuleAlb: #allow self
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      SourceSecurityGroupId: !GetAtt SgrALB.GroupId
+      GroupId: !GetAtt SgrALB.GroupId
+
+  SgrParameterArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Application, !Ref Stage, "sgr", "alb", "arn" ] ]
+      Type: "String"
+      Value: !GetAtt SgrALB.GroupId
+
+  ALB:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Scheme: !Ref ALBSchemeParam
+      Subnets: !Ref PublicSubnets
+      SecurityGroups:
+        - !Ref SgrALB
+
+  ALBParameterArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Application, !Ref Stage, "alb", "arn","cf" ] ]
+      Type: "String"
+      Value: !Ref ALB
+
+  ALBParameterLoadBalancerFullName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Application, !Ref Stage, "alb", "loadBalancerfullname","cf" ] ]
+      Type: "String"
+      Value: !GetAtt ALB.LoadBalancerFullName
+
+  ALBParameterHostedZoneID:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Application, !Ref Stage, "alb", "hosted-zone-id","cf" ] ]
+      Type: "String"
+      Value: !GetAtt ALB.CanonicalHostedZoneID
+
+  ALBParameterDNS:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Application, !Ref Stage, "alb", "dns","cf" ] ]
+      Type: "String"
+      Value: !GetAtt ALB.DNSName
+
+  HTTPListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - Type: "redirect"
+          RedirectConfig:
+            Protocol: "HTTPS"
+            Port: 443
+            Host: "#{host}"
+            Path: "/#{path}"
+            Query: "#{query}"
+            StatusCode: "HTTP_301"
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+
+  HTTPSListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - Type: "fixed-response"
+          FixedResponseConfig:
+            ContentType: text/html
+            MessageBody: "Content not found"
+            StatusCode: 503
+      LoadBalancerArn: !Ref ALB
+      Port: '443'
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref ALBCertificateParam
+
+  CertificatesList:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref ALBArtifactoryCertificateParam
+        - CertificateArn: !Ref SECONDDOMAINALBCertificateParam
+        - CertificateArn: !Ref SECONDDOMAINALBArtifactoryCertificateParam
+      ListenerArn: !Ref HTTPSListener
+
+  HTTPSListenerParameterARN:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Application, !Ref Stage, "https-listener", "arn","cf" ] ]
+      Type: "String"
+      Value: !Ref HTTPSListener
+
+  ALBCertificates:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref SECONDDOMAINALBCertificateParam
+        - CertificateArn: !Ref ALBCertificateParam
+      ListenerArn: !Ref HTTPSListener

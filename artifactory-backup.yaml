@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates an EFS FileSystem, MountTargets and SecurityGroup.
+#aws cloudformation deploy --stack-name artifactory-aws-backup --template-file artifactory-backup.yml --capabilities CAPABILITY_NAMED_IAM --region eu-west-1 --parameter-overrides Stage=prod
+Parameters:
+  Application:
+    Description: "Enter name of application that uses this EFS volume."
+    Type: String
+    Default: "artifactory"
+  Stage:
+    Description: Stage
+    Type: String
+  Repository:
+    Type: String
+    Default: "MY_REPO_URL"
+
+Resources:
+#Shared
+  BackupRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "backup.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"
+
+#EFS
+  EFSBackupVaultDaily:
+    Type: "AWS::Backup::BackupVault"
+    Properties:
+      BackupVaultName: !Sub "${Application}-ecs-${Stage}-EFS-daily-backup-vault"
+      BackupVaultTags:
+        Application: !Ref Application
+        Stage: !Ref Stage
+        Repository: !Ref Repository
+
+  EFSBackupVaultWeekly:
+    Type: "AWS::Backup::BackupVault"
+    Properties:
+      BackupVaultName: !Sub "${Application}-ecs-${Stage}-EFS-weekly-backup-vault"
+      BackupVaultTags:
+        Application: !Ref Application
+        Stage: !Ref Stage
+        Repository: !Ref Repository
+
+  EFSBackupVaultMonthly:
+    Type: "AWS::Backup::BackupVault"
+    Properties:
+      BackupVaultName: !Sub "${Application}-ecs-${Stage}-EFS-monthly-backup-vault"
+      BackupVaultTags:
+        Application: !Ref Application
+        Stage: !Ref Stage
+        Repository: !Ref Repository
+
+  EFSBackupPlan:
+    Type: "AWS::Backup::BackupPlan"
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub "${Application}-ecs-${Stage}-EFS-backup-plan"
+        BackupPlanRule:
+          -
+            RuleName: "RuleForDailyBackups"
+            TargetBackupVault: !Ref EFSBackupVaultDaily
+            ScheduleExpression: "cron(0 3 * * ? *)" #Everyday at 03:00
+            Lifecycle:
+              DeleteAfterDays: 7
+            StartWindowMinutes: 60
+            RecoveryPointTags:
+              Backup: Daily
+          -
+            RuleName: "RuleForWeeklyBackups"
+            TargetBackupVault: !Ref EFSBackupVaultWeekly
+            ScheduleExpression: "cron(0 3 ? * 1 *)" #Every monday at 03:00
+            Lifecycle:
+              DeleteAfterDays: 28
+            StartWindowMinutes: 60
+            RecoveryPointTags:
+              Backup: Weekly
+          -
+            RuleName: "RuleForMonthlyBackups"
+            TargetBackupVault: !Ref EFSBackupVaultMonthly
+            ScheduleExpression: "cron(0 3 1 * ? *)" #Every 1st day of the month at 03:00
+            Lifecycle:
+              DeleteAfterDays: 365
+              MoveToColdStorageAfterDays: 1
+            StartWindowMinutes: 60
+            RecoveryPointTags:
+              Backup: Monthly
+      BackupPlanTags:
+        Application: !Ref Application
+        Stage: !Ref Stage
+        Repository: !Ref Repository
+
+  EFSBackupSelection:
+    Type: "AWS::Backup::BackupSelection"
+    Properties:
+      BackupSelection:
+        SelectionName: "BackupEFS"
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !Sub "{{resolve:ssm:/${Stage}/${Application}/efs/arn}}"
+      BackupPlanId: !Ref EFSBackupPlan
+
+#RDS
+  RDSBackupVaultDaily:
+    Type: "AWS::Backup::BackupVault"
+    Properties:
+      BackupVaultName: !Sub "${Application}-ecs-${Stage}-RDS-daily-backup-vault"
+      BackupVaultTags:
+        Application: !Ref Application
+        Stage: !Ref Stage
+        Repository: !Ref Repository
+
+  RDSBackupVaultWeekly:
+    Type: "AWS::Backup::BackupVault"
+    Properties:
+      BackupVaultName: !Sub "${Application}-ecs-${Stage}-RDS-weekly-backup-vault"
+      BackupVaultTags:
+        Application: !Ref Application
+        Stage: !Ref Stage
+        Repository: !Ref Repository
+
+  RDSBackupVaultMonthly:
+    Type: "AWS::Backup::BackupVault"
+    Properties:
+      BackupVaultName: !Sub "${Application}-ecs-${Stage}-RDS-monthly-backup-vault"
+      BackupVaultTags:
+        Application: !Ref Application
+        Stage: !Ref Stage
+        Repository: !Ref Repository
+
+  RDSBackupPlan:
+    Type: "AWS::Backup::BackupPlan"
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub "${Application}-ecs-${Stage}-RDS-backup-plan"
+        BackupPlanRule:
+          -
+            RuleName: "RuleForDailyBackups"
+            TargetBackupVault: !Ref RDSBackupVaultDaily
+            ScheduleExpression: "cron(0 3 * * ? *)" #Everyday at 03:00
+            Lifecycle:
+              DeleteAfterDays: 7
+            StartWindowMinutes: 60
+            RecoveryPointTags:
+              Backup: Daily
+          -
+            RuleName: "RuleForWeeklyBackups"
+            TargetBackupVault: !Ref RDSBackupVaultWeekly
+            ScheduleExpression: "cron(0 1 ? * 1 *)" #Every monday at 01:00
+            Lifecycle:
+              DeleteAfterDays: 28
+            StartWindowMinutes: 60
+            RecoveryPointTags:
+              Backup: Weekly
+          -
+            RuleName: "RuleForMonthlyBackups"
+            TargetBackupVault: !Ref RDSBackupVaultMonthly
+            ScheduleExpression: "cron(0 3 1 * ? *)" #Every 1st day of the month at 03:00
+            Lifecycle:
+              DeleteAfterDays: 365
+            StartWindowMinutes: 60
+            RecoveryPointTags:
+              Backup: Monthly
+      BackupPlanTags:
+        Application: !Ref Application
+        Stage: !Ref Stage
+        Repository: !Ref Repository
+
+  RDSBackupSelection:
+    Type: "AWS::Backup::BackupSelection"
+    Properties:
+      BackupSelection:
+        SelectionName: "BackupRDS"
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !Join
+            - ''
+            - - !Sub "arn:aws:rds:eu-west-1:${AWS::AccountId}:db:"
+              - !Sub "{{resolve:ssm:/${Stage}/${Application}/rds/arn}}"
+      BackupPlanId: !Ref RDSBackupPlan

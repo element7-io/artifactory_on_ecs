@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates an EFS FileSystem, MountTargets and SecurityGroup.
+
+Parameters:
+  Application:
+    Description: "Enter name of application that uses this EFS volume."
+    Type: String
+    Default: "artifactory"
+  VpcId:
+    Description: VPC associated with the provided subnets
+    Type: AWS::EC2::VPC::Id
+    AllowedValues:
+      - VPC_IDENTIFIER #Prod
+      - VPC_IDENTIFIER #Non-prod
+  Stage:
+    Description: Stage
+    Type: String
+
+Resources:
+  VpcInfo:
+    Type: "Custom::VpcInfo"
+    Properties:
+      ServiceToken: !ImportValue CustomResourceInfoLambaArn
+      VpcId: !Ref VpcId
+
+#EFS Security group
+  SgEfsFilesystem:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: !Sub "${Application}-${Stage}-EFS"
+
+  InboundRuleEFS: #allow self
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      SourceSecurityGroupId: !GetAtt SgEfsFilesystem.GroupId
+      GroupId: !GetAtt SgEfsFilesystem.GroupId
+      Description: "Allow self"
+
+  SgEfsParameterGroupId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Stage, !Ref Application, "sgr", "EfsSecurityGroup" ] ]
+      Type: "String"
+      Value: !GetAtt SgEfsFilesystem.GroupId
+####################
+
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+      # LifecyclePolicies:
+      #   - TransitionToIA: AFTER_7_DAYS
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "${Application}-${Stage}-cfn"
+
+  EfsParameterSystemId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Stage, !Ref Application, "efs", "systemID" ] ]
+      Type: "String"
+      Value: !Ref FileSystem
+
+  EfsParameterArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Stage, !Ref Application, "efs", "arn" ] ]
+      Type: "String"
+      Value: !GetAtt FileSystem.Arn
+
+  MountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !GetAtt VpcInfo.PrivateSubnetA
+      SecurityGroups:
+        - !Ref SgEfsFilesystem
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !GetAtt VpcInfo.PrivateSubnetB
+      SecurityGroups:
+        - !Ref SgEfsFilesystem
+  MountTarget3:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !GetAtt VpcInfo.PrivateSubnetC
+      SecurityGroups:
+        - !Ref SgEfsFilesystem

@@ -1,0 +1,11 @@
+{
+    "Parameters": {
+        "Stage": "prod",
+        "Application": "artifactory"
+    },
+    "Tags" : {
+        "Application" : "artifactory",
+        "Stage": "prod",
+        "Repository": "MY_REPO_URL"
+    }
+}

@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Restore PROD RDS for Artifactory"
+
+Parameters:
+  Stage:
+    Type: String
+    Description: "Stage tag prod or *"
+    Default: "dev"
+    AllowedValues:
+      - "dev"
+      - "prod"
+  Application:
+    Type: String
+    Default: artificatory
+  ArtiVPCParam:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: 'VPC to deploy in'
+    AllowedValues:
+      - VPC_IDENTIFIER #prod
+      - VPC_IDENTIFIER #non-prod
+  ArtiDBSubnetGroupParam:
+    Type: String
+    Description: 'Name of SubnetGroup for RDS instance'
+    AllowedValues:
+      - XXXXXXXXXXXXX #prod
+      - YYYYYYYYYYYYY #non-prod
+
+  #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-rds-database-instance.html#cfn-rds-dbinstance-dbsnapshotidentifier
+  #Caution: once you create a DB from a snapshot this value has to remain the same! Otherwise an empty DB will be created!
+  DBSnapshotIdentifier:
+    Type: String
+    Description: "ARN of the DB snapshot, this value has to remain the same for future updates!!!!!"
+    Default: arn:aws:rds:eu-west-1:012345678912:snapshot:awsbackup:job-XXXXXX-CCCC-FFFFF-SSSSS-FFFFFFF
+  EngineVersion:
+    Type: String
+    Default: '11.13'
+  RDSInstanceType:
+    Type: String
+    Default: db.t3.medium
+
+#Monitoring and Alerting
+  ComparisonOperatorCPU:
+    Description: Comparison Operator for Alarm
+    Type: String
+    Default: GreaterThanOrEqualToThreshold
+    AllowedValues:
+    - GreaterThanOrEqualToThreshold
+    - GreaterThanThreshold
+    - LessThanThreshold
+    - LessThanOrEqualToThreshold
+  ComparisonOperatorStorage:
+    Description: Comparison Operator for Alarm
+    Type: String
+    Default: LessThanOrEqualToThreshold
+    AllowedValues:
+    - GreaterThanOrEqualToThreshold
+    - GreaterThanThreshold
+    - LessThanThreshold
+    - LessThanOrEqualToThreshold
+  Statistic:
+    Description: The statistic to apply to the alarm's associated metric
+    Type: String
+    Default: Minimum
+    AllowedValues:
+    - SampleCount
+    - Average
+    - Sum
+    - Minimum
+    - Maximum
+
+Conditions:
+  CreateProdResources: !Equals
+    - !Ref Stage
+    - prod
+
+Resources:
+#RDS Security group
+  SgRDS:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: !Sub "${Application}-${Stage}-RDS"
+      VpcId: !Ref ArtiVPCParam
+
+  InboundRuleRDS: #allow self
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      SourceSecurityGroupId: !GetAtt SgRDS.GroupId
+      GroupId: !GetAtt SgRDS.GroupId
+      Description: "Allow self"
+
+  SgRdsParameterArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Stage, !Ref Application, "sgr", "RdsSecurityGroup" ] ]
+      Type: "String"
+      Value: !GetAtt SgRDS.GroupId
+####################
+
+  ArtiPostgresDB:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      CopyTagsToSnapshot: true
+      DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
+      AllocatedStorage: '100'
+      BackupRetentionPeriod: '7'
+      DBInstanceClass: !Ref RDSInstanceType
+      DBSubnetGroupName: !Ref ArtiDBSubnetGroupParam
+      Engine: 'postgres'
+      EngineVersion: !Ref EngineVersion
+      MultiAZ: true
+      PubliclyAccessible: false
+      StorageType: "gp2"
+      VPCSecurityGroups:
+        - !GetAtt SgRDS.GroupId
+      DBName: !Ref 'AWS::NoValue' #Restore from snapshot
+      MasterUsername: !Ref 'AWS::NoValue' #Restore from snapshot
+      MasterUserPassword: !Ref 'AWS::NoValue' #Restore from snapshot
+
+  RdsParameterArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Stage, !Ref Application, "rds", "arn" ] ]
+      Type: "String"
+      Value: !Ref ArtiPostgresDB
+
+  SnsAlerting:
+    Type: AWS::SNS::Topic
+
+  SnsAlertingSubscription: #Only creates a subscription if it is for production
+    Condition: CreateProdResources
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: yournotification@email.com
+      Protocol: email
+      TopicArn: !Ref SnsAlerting
+
+  SnsParameterArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join [ '/', [ '',!Ref Stage, !Ref Application, "sns", "arn" ] ]
+      Type: "String"
+      Value: !Ref SnsAlerting
+
+  CwAlarmRdsCPU:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "Database Artifactory-ecs ${Stage} CPU usage higher than 75 percent for 15 minutes"
+      AlarmDescription: Trigger alarm If CPUUtilization higher than 75 percent (threshold) in 15 minutes
+      ComparisonOperator:
+        Ref: ComparisonOperatorCPU
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      EvaluationPeriods: '1'
+      Period: '900'
+      Threshold: '75'
+      ExtendedStatistic: p90
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref ArtiPostgresDB
+      AlarmActions:
+        - !Ref SnsAlerting
+
+  CwAlarmRdsStorage:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "Database Artifactory-ecs ${Stage} storage lower than 10gb"
+      AlarmDescription: Trigger alarm If FreeStorageSpace lower than 10gb
+      ComparisonOperator:
+        Ref: ComparisonOperatorStorage
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      EvaluationPeriods: '1'
+      Period: '900'
+      Threshold: '10000000000'
+      Statistic: !Ref Statistic
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref ArtiPostgresDB
+      AlarmActions:
+        - !Ref SnsAlerting

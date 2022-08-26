@@ -1,0 +1,12 @@
+{
+    "Parameters": {
+        "Stage": "dev",
+        "Application": "artifactory",
+        "VpcId":"VPC_IDENTIFIER"
+    },
+    "Tags" : {
+        "Application" : "artifactory",
+        "Stage": "dev",
+        "Repository": "MY_REPO_URL"
+    }
+}

@@ -1,0 +1,15 @@
+{
+    "Parameters": {
+        "Stage": "dev",
+        "Application": "artifactory",
+        "ALBSchemeParam": "internet-facing",
+        "ALBVPCParam": "VPC_IDENTIFIER",
+        "PrivateSubnets": "PRIVATE_SUBNET_1,PRIVATE_SUBNET_2,PRIVATE_SUBNET_3, ...",
+        "PublicSubnets": "PUBLIC_SUBNET_1,PUBLIC_SUBNET_2,PUBLIC_SUBNET_3, ..."
+    },
+    "Tags" : {
+        "Application" : "artifactory",
+        "Stage": "dev",
+        "Repository": "MY_REPO_URL"
+    }
+}
